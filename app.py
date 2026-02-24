@@ -1,8 +1,9 @@
 import streamlit as st
 import ee
-import geemap.foliumap as geemap
+import folium
+from streamlit_folium import st_folium
 
-# --- Page Config ---
+# ── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Flood Analysis Dashboard",
     page_icon="🌊",
@@ -10,148 +11,202 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- Initialize Earth Engine ---
-# Streamlit Community Cloud uses secrets for authentication
+# ── Dark Theme CSS ─────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+    .stApp { background-color: #0E1117; color: #FAFAFA; }
+    section[data-testid="stSidebar"] { background-color: #1A1F2E; }
+    .metric-card {
+        background: linear-gradient(135deg, #1A1F2E, #2A3050);
+        border: 1px solid #00CFFF33;
+        border-radius: 12px;
+        padding: 20px;
+        text-align: center;
+        margin-bottom: 12px;
+    }
+    .metric-value { font-size: 2rem; font-weight: 700; color: #00CFFF; }
+    .metric-label { font-size: 0.85rem; color: #aaa; margin-top: 4px; }
+    h1, h2, h3 { color: #FAFAFA !important; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ── Earth Engine Initialization ────────────────────────────────────────────────
 @st.cache_resource
-def ee_authenticate(token_name="EARTHENGINE_TOKEN"):
+def init_ee():
+    """Initialize Earth Engine using Streamlit Secrets or local credentials."""
     try:
-        ee.Initialize(project='ee-your-project-id') # Update with a project id if needed
+        import json
+        token = st.secrets.get("EARTHENGINE_TOKEN", None)
+        if token:
+            import os, tempfile
+            creds = json.loads(token) if isinstance(token, str) else dict(token)
+            cred_path = os.path.join(tempfile.gettempdir(), "ee_credentials.json")
+            with open(cred_path, "w") as f:
+                json.dump(creds, f)
+            credentials = ee.ServiceAccountCredentials(
+                creds.get("client_email", ""),
+                cred_path
+            )
+            ee.Initialize(credentials)
+        else:
+            ee.Initialize()
+        return True
     except Exception as e:
-        ee.Authenticate()
-        ee.Initialize()
+        st.error(f"Earth Engine init failed: {e}")
+        return False
 
-ee_authenticate()
+ee_ready = init_ee()
 
 
-# --- Sidebar ---
+# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e1/Satellite_icon.svg/1024px-Satellite_icon.svg.png", width=100)
-    st.title("🌊 Flood Mapping Analysis")
+    st.markdown("## 🌊 Flood Mapping Dashboard")
+    st.caption("Powered by Sentinel-1 SAR · Google Earth Engine")
     st.markdown("---")
-    
-    st.markdown(
-        """
-        **About this Dashboard**
-        This application visualizes flood extents using Synthetic Aperture Radar (SAR) imagery from the Sentinel-1 satellite.
-        
-        SAR can penetrate clouds and rain, making it the industry standard for mapping floods during persistent weather events.
-        """
-    )
-    
-    st.markdown("### Controls")
-    
-    # Example event selection
-    event = st.selectbox(
-        "Select Event",
-        ("2022 Pakistan Floods (Sindh)", "Custom Area")
-    )
-    
-    # Default parameters for Pakistan Floods
-    default_pre_start = '2022-05-01'
-    default_pre_end = '2022-06-30'
-    default_post_start = '2022-08-15'
-    default_post_end = '2022-09-15'
-    
-    # Map layers toggles
-    st.markdown("### Layers to Display")
-    show_pre = st.checkbox("Show Pre-Flood SAR", value=False)
-    show_post = st.checkbox("Show Post-Flood SAR", value=False)
-    show_flood = st.checkbox("Show Flood Extent", value=True)
-    
+
+    st.markdown("""
+    **About**  
+    This dashboard maps flood extents using **Synthetic Aperture Radar (SAR)** — 
+    which penetrates clouds to detect floods even during active storms.
+
+    **Case study:** 2022 Pakistan Monsoon Floods, Sindh Province
+    """)
+
     st.markdown("---")
-    st.info("Data Source: Copernicus EU / European Space Agency / Google Earth Engine")
+    st.markdown("### 🗂️ Map Layers")
+    show_pre   = st.checkbox("Pre-Flood SAR",  value=False)
+    show_post  = st.checkbox("Post-Flood SAR", value=False)
+    show_flood = st.checkbox("Flood Extent",   value=True)
+    show_perm  = st.checkbox("Permanent Water (JRC)", value=False)
 
-# --- Processing Logic ---
-
-# Define AOI for Pakistan Event
-aoi = ee.Geometry.Polygon(
-    [[[67.5, 25.5],
-      [67.5, 27.5],
-      [69.5, 27.5],
-      [69.5, 25.5]]]
-)
-
-center_lat, center_lon = 26.5, 68.5
-
-@st.cache_data
-def process_flood_data(pre_s, pre_e, post_s, post_e):
-    # Retrieve imagery
-    collection = ee.ImageCollection('COPERNICUS/S1_GRD') \
-        .filterBounds(aoi) \
-        .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH')) \
-        .filter(ee.Filter.eq('instrumentMode', 'IW'))
-
-    pre_flood = collection.filterDate(pre_s, pre_e).mosaic().clip(aoi)
-    post_flood = collection.filterDate(post_s, post_e).mosaic().clip(aoi)
-
-    pre_vh = pre_flood.select('VH')
-    post_vh = post_flood.select('VH')
-    
-    # Speckle filter
-    smoothing_radius = 50 
-    pre_smoothed = pre_vh.focal_mean(smoothing_radius, 'circle', 'meters')
-    post_smoothed = post_vh.focal_mean(smoothing_radius, 'circle', 'meters')
-
-    # Difference and threshold
-    difference = post_smoothed.subtract(pre_smoothed)
-    flood_threshold = -3
-    water_threshold = -16
-
-    flooded = difference.lt(flood_threshold).And(post_smoothed.lt(water_threshold))
-    flood_mask = flooded.updateMask(flooded)
-    
-    return pre_smoothed, post_smoothed, flood_mask
+    st.markdown("---")
+    st.caption("Data: ESA Copernicus Sentinel-1 · JRC Global Surface Water")
 
 
-pre_map, post_map, flood_layer = process_flood_data(
-    default_pre_start, default_pre_end, default_post_start, default_post_end
-)
+# ── EE Layer Helpers ───────────────────────────────────────────────────────────
+def get_tile_url(ee_image, vis_params):
+    """Return an XYZ tile URL for an EE image (no geemap required)."""
+    map_id = ee_image.getMapId(vis_params)
+    return map_id["tile_fetcher"].url_format
 
 
-# --- Main Layout ---
-col1, col2 = st.columns([3, 1])
+# ── Data Processing ────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner="Processing SAR imagery…")
+def compute_flood_layers():
+    AOI = ee.Geometry.Polygon([[[67.5, 25.5],[67.5, 27.5],[69.5, 27.5],[69.5, 25.5]]])
 
-with col1:
-    st.markdown("### Interactive Map View")
-    Map = geemap.Map(center=[center_lat, center_lon], zoom=8, add_google_map=False)
-    Map.add_basemap('SATELLITE')
-    
-    if show_pre:
-        Map.addLayer(pre_map, {'min': -25, 'max': -5}, 'Pre-flood SAR', True)
-    if show_post:
-        Map.addLayer(post_map, {'min': -25, 'max': -5}, 'Post-flood SAR', True)
-    if show_flood:
-        Map.addLayer(flood_layer, {'palette': ['00FFFF']}, 'Flood Extent (Cyan)')
+    s1 = (ee.ImageCollection("COPERNICUS/S1_GRD")
+          .filterBounds(AOI)
+          .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
+          .filter(ee.Filter.eq("instrumentMode", "IW"))
+          .select("VH"))
 
-    Map.to_streamlit(height=650)
+    pre_vh  = s1.filterDate("2022-05-01", "2022-06-30").mosaic().clip(AOI)
+    post_vh = s1.filterDate("2022-08-15", "2022-09-15").mosaic().clip(AOI)
+
+    r = 50  # speckle filter radius (m)
+    pre_sm  = pre_vh.focal_mean(r, "circle", "meters")
+    post_sm = post_vh.focal_mean(r, "circle", "meters")
+
+    diff = post_sm.subtract(pre_sm)
+    flooded_raw = diff.lt(-3).And(post_sm.lt(-16))
+
+    perm_water = ee.Image("JRC/GSW1_4/GlobalSurfaceWater").select("seasonality").gte(10)
+    flood_ext  = flooded_raw.where(perm_water, 0).updateMask(flooded_raw.where(perm_water, 0))
+
+    # Area stats (500m scale for speed)
+    area_img = flood_ext.multiply(ee.Image.pixelArea()).divide(10000)
+    stats = area_img.reduceRegion(
+        reducer=ee.Reducer.sum(), geometry=AOI, scale=500,
+        maxPixels=1e9, bestEffort=True
+    ).getInfo()
+    flooded_ha = stats.get("VH", 0) or 0
+    aoi_ha = AOI.area(maxError=1).getInfo() / 10000
+
+    return pre_sm, post_sm, flood_ext, perm_water, flooded_ha, aoi_ha
 
 
-with col2:
-    st.markdown("### Statistics (Estimated)")
-    
-    # The calculation on EE is slow and can timeout if done across a huge area in the UI directly.
-    # So we display an estimated static value or calculate a very downsampled version.
-    # Let's do a fast reduced calculation
-    with st.spinner("Calculating affected area..."):
-        try:
-            # Downsampled scale for faster UI performance
-            area_img = flood_layer.multiply(ee.Image.pixelArea()).divide(10000)
-            stats = area_img.reduceRegion(
-                reducer=ee.Reducer.sum(),
-                geometry=aoi,
-                scale=500, # 500m scale for fast approximation
-                maxPixels=1e9
-            ).getInfo()
-            
-            calculated_area = stats.get('VH', 0)
-            st.metric(label="Estimated Flooded Area", value=f"{calculated_area:,.2f} ha")
-        except Exception as e:
-            st.metric(label="Estimated Flooded Area", value="Calculation Error")
-            st.error(f"Error: {e}")
-            
-    st.markdown(
-        """
-        > **Note:** The area calculation is an approximation running at a downsampled resolution (500m) 
-        > to prevent timeouts within the interactive dashboard. See the Jupyter Notebook for full-resolution calculations.
-        """
-    )
+# ── Main Layout ────────────────────────────────────────────────────────────────
+st.markdown("# 🌊 Flood Analysis Dashboard — 2022 Pakistan Floods")
+st.markdown("Sentinel-1 SAR backscatter change detection · Sindh Province, Pakistan")
+st.markdown("---")
+
+col_map, col_stats = st.columns([3, 1])
+
+if not ee_ready:
+    st.warning("Earth Engine is not initialised. Add EARTHENGINE_TOKEN to Streamlit Secrets.")
+else:
+    with st.spinner("Loading satellite data…"):
+        pre_sm, post_sm, flood_ext, perm_water, flooded_ha, aoi_ha = compute_flood_layers()
+
+    pct = (flooded_ha / aoi_ha * 100) if aoi_ha else 0
+    flooded_km2 = flooded_ha / 100
+
+    # ── Stats Column ─────────────────────────────────────────────────
+    with col_stats:
+        st.markdown("### 📊 Statistics")
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{flooded_ha:,.0f}</div>
+            <div class="metric-label">Flooded Area (Hectares)</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{flooded_km2:,.0f}</div>
+            <div class="metric-label">Flooded Area (km²)</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{pct:.1f}%</div>
+            <div class="metric-label">% of Study Area Affected</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("### 📍 Event Details")
+        st.info("""
+**Event:** 2022 Pakistan Monsoon Floods
+
+**Region:** Sindh Province
+
+**Pre-Flood:** May – June 2022  
+**Post-Flood:** Aug – Sep 2022
+
+**Sensor:** Sentinel-1 GRD (VH pol.)
+
+**Processing:** Speckle filter + backscatter change detection
+        """)
+
+    # ── Map Column ────────────────────────────────────────────────────
+    with col_map:
+        st.markdown("### 🗺️ Interactive Flood Map")
+
+        m = folium.Map(location=[26.5, 68.5], zoom_start=8,
+                       tiles="CartoDB dark_matter")
+
+        sar_vis   = {"min": -25, "max": -5, "palette": ["000000", "ffffff"]}
+        flood_vis = {"palette": ["00CFFF"]}
+        perm_vis  = {"palette": ["0055FF"]}
+
+        if show_pre:
+            url = get_tile_url(pre_sm, sar_vis)
+            folium.TileLayer(tiles=url, attr="Google Earth Engine",
+                             name="Pre-Flood SAR", overlay=True).add_to(m)
+
+        if show_post:
+            url = get_tile_url(post_sm, sar_vis)
+            folium.TileLayer(tiles=url, attr="Google Earth Engine",
+                             name="Post-Flood SAR", overlay=True).add_to(m)
+
+        if show_flood:
+            url = get_tile_url(flood_ext, flood_vis)
+            folium.TileLayer(tiles=url, attr="Google Earth Engine",
+                             name="Flood Extent", overlay=True,
+                             opacity=0.85).add_to(m)
+
+        if show_perm:
+            url = get_tile_url(perm_water.updateMask(perm_water), perm_vis)
+            folium.TileLayer(tiles=url, attr="Google Earth Engine",
+                             name="Permanent Water", overlay=True,
+                             opacity=0.7).add_to(m)
+
+        folium.LayerControl().add_to(m)
+        st_folium(m, width=None, height=620, returned_objects=[])

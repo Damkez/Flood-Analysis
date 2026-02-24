@@ -1,5 +1,5 @@
 streamlit
-geemap[folium]
+folium
+streamlit-folium
 earthengine-api
 jupyter
-python-box<7.0.0
