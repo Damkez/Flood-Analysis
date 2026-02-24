@@ -4,4 +4,7 @@ streamlit-folium
 earthengine-api
 google-auth
 requests
+plotly
+numpy
+pandas
 jupyter
