@@ -1,0 +1,4 @@
+streamlit
+geemap[folium]
+earthengine-api
+jupyter
