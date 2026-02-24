@@ -2,4 +2,6 @@ streamlit
 folium
 streamlit-folium
 earthengine-api
+google-auth
+requests
 jupyter

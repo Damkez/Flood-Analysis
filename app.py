@@ -34,24 +34,57 @@ st.markdown("""
 # ── Earth Engine Initialization ────────────────────────────────────────────────
 @st.cache_resource
 def init_ee():
-    """Initialize Earth Engine using Streamlit Secrets or local credentials."""
+    """Initialize Earth Engine from Streamlit Secrets (handles both OAuth2 and Service Account)."""
+    import json
+
+    token_raw = st.secrets.get("EARTHENGINE_TOKEN", None)
+    if not token_raw:
+        st.error("No EARTHENGINE_TOKEN found in Streamlit Secrets.")
+        return False
+
     try:
-        import json
-        token = st.secrets.get("EARTHENGINE_TOKEN", None)
-        if token:
-            import os, tempfile
-            creds = json.loads(token) if isinstance(token, str) else dict(token)
-            cred_path = os.path.join(tempfile.gettempdir(), "ee_credentials.json")
-            with open(cred_path, "w") as f:
-                json.dump(creds, f)
-            credentials = ee.ServiceAccountCredentials(
-                creds.get("client_email", ""),
-                cred_path
-            )
+        creds_dict = json.loads(token_raw) if isinstance(token_raw, str) else dict(token_raw)
+    except json.JSONDecodeError as e:
+        st.error(f"Could not parse EARTHENGINE_TOKEN as JSON: {e}")
+        return False
+
+    try:
+        # Service account: has 'client_email' and 'private_key'
+        if "client_email" in creds_dict and "private_key" in creds_dict:
+            import google.oauth2.service_account as sa
+            scopes = ["https://www.googleapis.com/auth/earthengine"]
+            credentials = sa.Credentials.from_service_account_info(creds_dict, scopes=scopes)
             ee.Initialize(credentials)
+
+        # OAuth2 user credentials: has 'refresh_token' and 'client_id'
+        elif "refresh_token" in creds_dict:
+            import google.oauth2.credentials
+            from google.auth.transport.requests import Request
+
+            # Ensure token_uri exists
+            if "token_uri" not in creds_dict:
+                creds_dict["token_uri"] = "https://oauth2.googleapis.com/token"
+
+            credentials = google.oauth2.credentials.Credentials(
+                token=creds_dict.get("token"),
+                refresh_token=creds_dict["refresh_token"],
+                token_uri=creds_dict["token_uri"],
+                client_id=creds_dict["client_id"],
+                client_secret=creds_dict["client_secret"],
+                scopes=creds_dict.get("scopes", ["https://www.googleapis.com/auth/earthengine"]),
+            )
+            # Refresh the token if it's expired
+            if credentials.expired or not credentials.valid:
+                credentials.refresh(Request())
+
+            ee.Initialize(credentials)
+
         else:
-            ee.Initialize()
+            st.error("EARTHENGINE_TOKEN is not a recognised credential format.")
+            return False
+
         return True
+
     except Exception as e:
         st.error(f"Earth Engine init failed: {e}")
         return False
