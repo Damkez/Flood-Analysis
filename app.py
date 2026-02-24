@@ -44,10 +44,17 @@ def init_ee():
         return False
 
     try:
-        creds_dict = json.loads(token_raw) if isinstance(token_raw, str) else dict(token_raw)
-    except Exception as e:
-        st.error(f"⛔ Could not parse EARTHENGINE_TOKEN as JSON: {e}")
-        return False
+        creds_dict = json.loads(token_raw)
+    except json.JSONDecodeError:
+        # TOML triple-quoted strings expand \n escape sequences to real newlines.
+        # Re-escape them so json.loads can handle the private_key field correctly.
+        token_clean = token_raw.replace('\r\n', '\\n').replace('\n', '\\n').replace('\r', '\\n')
+        try:
+            creds_dict = json.loads(token_clean)
+        except Exception as e:
+            st.error(f"⛔ Could not parse EARTHENGINE_TOKEN as JSON: {e}")
+            return False
+
 
     try:
         scopes = ["https://www.googleapis.com/auth/earthengine"]
