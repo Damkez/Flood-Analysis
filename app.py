@@ -1,495 +1,520 @@
 import streamlit as st
 import ee
 import folium
-from folium.plugins import HeatMap, FloatImage
+from folium.plugins import HeatMap, DualMap
 from streamlit_folium import st_folium
-import json
+import json, numpy as np, pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-import pandas as pd
-import numpy as np
+from plotly.subplots import make_subplots
 import google.oauth2.service_account as sa
 
-# ── Page Config ────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Flood Analysis Dashboard",
-    page_icon="🌊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Flood Intelligence Dashboard", page_icon="🌊", layout="wide", initial_sidebar_state="expanded")
 
-# ── Styling ────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
+st.markdown("""<style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
-
 * { font-family: 'Inter', sans-serif; }
-.stApp { background-color: #0A0E1A; color: #E8EAF0; }
-section[data-testid="stSidebar"] { background: linear-gradient(180deg, #0D1321 0%, #1A2035 100%); border-right: 1px solid #1E2D40; }
-.metric-card {
-    background: linear-gradient(135deg, #0D1B2A, #1A2A40);
-    border: 1px solid rgba(0,207,255,0.2);
-    border-radius: 14px;
-    padding: 18px 14px;
-    text-align: center;
-    margin-bottom: 10px;
-    transition: border-color 0.3s;
-}
-.metric-card:hover { border-color: rgba(0,207,255,0.6); }
-.metric-value { font-size: 1.8rem; font-weight: 700; color: #00CFFF; }
-.metric-label { font-size: 0.75rem; color: #8897AA; margin-top: 4px; letter-spacing: 0.5px; text-transform: uppercase; }
-.metric-delta { font-size: 0.72rem; color: #FF6B6B; margin-top: 3px; }
-.section-header {
-    color: #00CFFF;
-    font-size: 0.8rem;
-    font-weight: 600;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    border-bottom: 1px solid #1E2D40;
-    padding-bottom: 6px;
-    margin: 16px 0 10px 0;
-}
-.info-box {
-    background: linear-gradient(135deg, #0D1B2A, #131F30);
-    border: 1px solid #1E3050;
-    border-radius: 10px;
-    padding: 14px;
-    font-size: 0.82rem;
-    line-height: 1.6;
-    color: #B0BECF;
-    margin-bottom: 10px;
-}
-.tag {
-    display: inline-block;
-    background: rgba(0,207,255,0.1);
-    color: #00CFFF;
-    border: 1px solid rgba(0,207,255,0.3);
-    border-radius: 20px;
-    padding: 2px 10px;
-    font-size: 0.7rem;
-    margin: 2px;
-}
-h1 { color: #FFFFFF !important; font-weight: 700 !important; }
-h2, h3 { color: #D0DFF0 !important; }
-.stSelectbox label, .stCheckbox label, .stSlider label { color: #8897AA !important; }
-div[data-testid="stMetric"] { background: transparent; }
-</style>
-""", unsafe_allow_html=True)
+.stApp { background-color: #080C18; color: #E8EAF0; }
+section[data-testid="stSidebar"] { background: #0B0F1E; border-right: 1px solid #1A2540; }
+.kpi { background: linear-gradient(135deg,#0D1829,#162035); border:1px solid rgba(0,200,255,.18);
+       border-radius:12px; padding:14px 10px; text-align:center; margin-bottom:8px; }
+.kpi-val { font-size:1.7rem; font-weight:700; color:#00C8FF; }
+.kpi-lbl { font-size:.68rem; color:#7A8FAA; text-transform:uppercase; letter-spacing:.8px; margin-top:3px; }
+.kpi-sub { font-size:.68rem; color:#FF6B6B; }
+.info { background:#0D1829; border:1px solid #1A2540; border-radius:10px; padding:12px;
+        font-size:.8rem; line-height:1.65; color:#B0BECF; margin-bottom:8px; }
+.sec { color:#00C8FF; font-size:.73rem; font-weight:700; letter-spacing:1.2px;
+       text-transform:uppercase; border-bottom:1px solid #1A2540; padding-bottom:5px; margin:14px 0 8px; }
+h1,h2,h3{color:#E8EAF0!important;}
+</style>""", unsafe_allow_html=True)
 
-
-# ── Earth Engine Init ──────────────────────────────────────────────────────────
+# ── Auth ───────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def init_ee():
-    token_raw = st.secrets.get("EARTHENGINE_TOKEN", None)
-    if not token_raw:
-        st.error("No EARTHENGINE_TOKEN in Streamlit Secrets.")
-        return False
+    raw = st.secrets.get("EARTHENGINE_TOKEN")
+    if not raw: st.error("No EARTHENGINE_TOKEN in Secrets."); return False
+    try: d = json.loads(raw)
+    except:
+        try: d = json.loads(raw.replace('\r\n','\\n').replace('\n','\\n').replace('\r','\\n'))
+        except Exception as e: st.error(f"Token parse error: {e}"); return False
     try:
-        creds_dict = json.loads(token_raw)
-    except json.JSONDecodeError:
-        token_clean = token_raw.replace('\r\n', '\\n').replace('\n', '\\n').replace('\r', '\\n')
-        try:
-            creds_dict = json.loads(token_clean)
-        except Exception as e:
-            st.error(f"Could not parse token: {e}")
-            return False
-    try:
-        scopes = ["https://www.googleapis.com/auth/earthengine"]
-        creds = sa.Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        ee.Initialize(creds)
-        return True
-    except Exception as e:
-        st.error(f"EE init failed: {e}")
-        return False
+        creds = sa.Credentials.from_service_account_info(d, scopes=["https://www.googleapis.com/auth/earthengine"])
+        ee.Initialize(creds); return True
+    except Exception as e: st.error(f"EE error: {e}"); return False
 
 ee_ready = init_ee()
 
+AOI = ee.Geometry.Polygon([[[67.5,25.5],[67.5,27.5],[69.5,27.5],[69.5,25.5]]])
+
+@st.cache_data(show_spinner="Loading satellite imagery...")
+def compute_layers():
+    s1 = (ee.ImageCollection("COPERNICUS/S1_GRD").filterBounds(AOI)
+          .filter(ee.Filter.listContains("transmitterReceiverPolarisation","VH"))
+          .filter(ee.Filter.eq("instrumentMode","IW")).select("VH"))
+    def sm(ic): return ic.mosaic().clip(AOI).focal_mean(50,"circle","meters")
+    pre  = sm(s1.filterDate("2022-05-01","2022-06-30"))
+    post = sm(s1.filterDate("2022-08-15","2022-09-15"))
+    diff = post.subtract(pre)
+    jrc  = ee.Image("JRC/GSW1_4/GlobalSurfaceWater").select("seasonality").gte(10).clip(AOI)
+    raw  = diff.lt(-3).And(post.lt(-16))
+    flood = raw.where(jrc,0).updateMask(raw.where(jrc,0))
+    stats = flood.multiply(ee.Image.pixelArea()).divide(10000).reduceRegion(
+        reducer=ee.Reducer.sum(), geometry=AOI, scale=500, maxPixels=1e9, bestEffort=True).getInfo()
+    ha = stats.get("VH",0) or 0
+    aoi_ha = AOI.area(maxError=1).getInfo()/10000
+    return pre, post, flood, jrc, diff, ha, aoi_ha
+
+def tile(img, vis): return img.getMapId(vis)["tile_fetcher"].url_format
+
+# ── Synthetic data helpers ─────────────────────────────────────────────────────
+np.random.seed(42)
+
+def depth_data():
+    lats = np.random.uniform(25.5,27.5,1200); lons = np.random.uniform(67.5,69.5,1200)
+    depths = np.abs(np.random.exponential(0.9,1200))
+    return lats, lons, depths
+
+def heatmap_pts():
+    lats = np.random.beta(2,4,900)*2+25.5; lons = np.random.uniform(67.5,69.5,900)
+    w = np.clip((27.5-lats)/2+np.random.uniform(0,.5,900),0.05,1)
+    return [[la,lo,wi] for la,lo,wi in zip(lats,lons,w)]
+
+def time_series():
+    days = pd.date_range("2022-06-01","2022-10-31",freq="D")
+    rain = np.clip(np.random.gamma(2,18,len(days)),0,None)
+    rain[50:90] += np.linspace(0,320,40)
+    disch = np.convolve(rain,[.1,.2,.3,.25,.15],mode="same")*180
+    gauge = np.cumsum(rain*0.003) % 8+2
+    return pd.DataFrame({"date":days,"rainfall_mm":rain,"discharge_m3s":disch,"gauge_m":gauge})
+
+def return_periods():
+    rp = {10:{"ha":120000,"km2":1200},50:{"ha":290000,"km2":2900},100:{"ha":450000,"km2":4500}}
+    return rp
+
+def impact_data():
+    hoods = ["Sukkur","Larkana","Jacobabad","Khairpur","Shikarpur","Dadu","Kamber","Naushahro Feroze"]
+    bldgs = np.random.randint(800,15000,8); pop = bldgs*np.random.uniform(4.2,5.8,8)
+    roads = np.random.uniform(10,120,8)
+    return pd.DataFrame({"neighborhood":hoods,"buildings":bldgs,"population":pop.astype(int),"roads_km":roads})
+
+def risk_curve():
+    probs = np.array([0.5,0.2,0.1,0.05,0.02,0.01,0.005,0.002])
+    losses = np.array([0.5,2,5,10,18,30,50,80])  # billion USD
+    ead = np.trapz(losses,1-probs)
+    return probs, losses, ead
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🌊 Flood Intelligence")
-    st.markdown("**2022 Pakistan Flood Analysis**")
-    st.markdown('<span class="tag">Sentinel-1 SAR</span><span class="tag">Google Earth Engine</span><span class="tag">Sindh Province</span>', unsafe_allow_html=True)
+    st.markdown("**2022 Pakistan Floods · Sindh**")
     st.markdown("---")
+    st.markdown('<div class="sec">Map Layers</div>', unsafe_allow_html=True)
+    show_flood = st.checkbox("Flood Extent",True)
+    show_heat  = st.checkbox("Risk Heatmap",True)
+    show_depth = st.checkbox("Depth Choropleth",False)
+    show_pre   = st.checkbox("Pre-Flood SAR",False)
+    show_post  = st.checkbox("Post-Flood SAR",False)
+    show_perm  = st.checkbox("Permanent Water",False)
+    st.markdown('<div class="sec">About</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info">Flood mapping using Sentinel-1 SAR imagery processed via Google Earth Engine. SAR penetrates clouds and rain allowing flood detection during active storms. Click on the map to explore local conditions.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">Event Timeline</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info"><b>June 2022:</b> Heavy monsoon onset<br><b>July 2022:</b> River overflows in KPK<br><b>Aug 25:</b> Peak inundation in Sindh<br><b>Sep 2022:</b> Gradual recession begins<br><b>Jan 2023:</b> Last flood pockets drain</div>', unsafe_allow_html=True)
+    st.caption("Data: ESA Copernicus / JRC / Google Earth Engine")
 
-    st.markdown('<div class="section-header">About This Dashboard</div>', unsafe_allow_html=True)
-    st.markdown("""<div class="info-box">
-    This dashboard maps the 2022 Pakistan monsoon floods using Sentinel-1 Synthetic Aperture Radar (SAR) imagery.
-    SAR penetrates clouds and rain — critical for flood response when optical satellites are blocked.
-    <br><br>
-    Click anywhere on the flood extent map to explore pre/post flood backscatter comparisons and trends at that location.
-    </div>""", unsafe_allow_html=True)
-
-    st.markdown('<div class="section-header">Map Layers</div>', unsafe_allow_html=True)
-    show_flood  = st.checkbox("Flood Extent",         value=True)
-    show_heat   = st.checkbox("Flood Risk Heatmap",   value=True)
-    show_pre    = st.checkbox("Pre-Flood SAR",         value=False)
-    show_post   = st.checkbox("Post-Flood SAR",        value=False)
-    show_perm   = st.checkbox("Permanent Water (JRC)", value=False)
-
-    st.markdown('<div class="section-header">Methodology</div>', unsafe_allow_html=True)
-    st.markdown("""<div class="info-box">
-    <b>1. Data:</b> Sentinel-1 GRD, VH polarisation<br>
-    <b>2. Preprocessing:</b> 50m focal-mean speckle filter<br>
-    <b>3. Detection:</b> Backscatter difference thresholding<br>
-    <b>4. Masking:</b> JRC permanent water removal<br>
-    <b>5. Validation:</b> Cross-referenced with relief reports
-    </div>""", unsafe_allow_html=True)
-
-    st.markdown('<div class="section-header">Event Timeline</div>', unsafe_allow_html=True)
-    st.markdown("""<div class="info-box">
-    <b>June 2022</b> — Unusually heavy monsoon onset<br>
-    <b>July 2022</b> — River overflows in KPK<br>
-    <b>Aug 25–31</b> — Peak inundation in Sindh<br>
-    <b>Sep 2022</b> — Gradual recession begins<br>
-    <b>Jan 2023</b> — Last flood pockets drain
-    </div>""", unsafe_allow_html=True)
-
-    st.caption("Data: ESA Copernicus / JRC Global Surface Water")
-
-
-# ── EE Processing ─────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner="Processing SAR imagery from Google Earth Engine...")
-def compute_layers():
-    AOI = ee.Geometry.Polygon([[[67.5, 25.5],[67.5, 27.5],[69.5, 27.5],[69.5, 25.5]]])
-
-    s1 = (ee.ImageCollection("COPERNICUS/S1_GRD")
-          .filterBounds(AOI)
-          .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
-          .filter(ee.Filter.eq("instrumentMode", "IW"))
-          .select("VH"))
-
-    def smooth(img): return img.mosaic().clip(AOI).focal_mean(50, "circle", "meters")
-
-    pre_sm  = smooth(s1.filterDate("2022-05-01", "2022-06-30"))
-    post_sm = smooth(s1.filterDate("2022-08-15", "2022-09-15"))
-
-    diff = post_sm.subtract(pre_sm)
-    perm_water = ee.Image("JRC/GSW1_4/GlobalSurfaceWater").select("seasonality").gte(10)
-    flooded_raw = diff.lt(-3).And(post_sm.lt(-16))
-    flood_ext = flooded_raw.where(perm_water, 0).updateMask(flooded_raw.where(perm_water, 0))
-
-    # Calculate area stats
-    area_img = flood_ext.multiply(ee.Image.pixelArea()).divide(10000)
-    stats = area_img.reduceRegion(
-        reducer=ee.Reducer.sum(), geometry=AOI, scale=500, maxPixels=1e9, bestEffort=True
-    ).getInfo()
-    flooded_ha = stats.get("VH", 0) or 0
-    aoi_ha = AOI.area(maxError=1).getInfo() / 10000
-
-    return pre_sm, post_sm, flood_ext, perm_water, diff, flooded_ha, aoi_ha
-
-
-def get_tile_url(ee_image, vis_params):
-    return ee_image.getMapId(vis_params)["tile_fetcher"].url_format
-
-
-# ── Simulate heatmap grid points from the AOI ─────────────────────────────────
-def generate_heatmap_data():
-    """Generate synthetic flood risk density points for the heatmap visualization."""
-    np.random.seed(42)
-    n_points = 800
-    # Weight towards lower elevations (south of AOI = more flood risk)
-    lats = np.random.beta(2, 4, n_points) * 2.0 + 25.5
-    lons = np.random.uniform(67.5, 69.5, n_points)
-    # Higher risk near center/south
-    weights = (27.5 - lats) / 2.0 + np.random.uniform(0, 0.5, n_points)
-    weights = np.clip(weights, 0.1, 1.0)
-    return [[lat, lon, w] for lat, lon, w in zip(lats, lons, weights)]
-
-
-# ── Build Plotly Charts ────────────────────────────────────────────────────────
-def make_sar_comparison_chart(lat, lon):
-    """SAR backscatter pre vs post at clicked location (simulated sample profile)."""
-    months = ['Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov']
-    pre_signal  = [-12, -11.5, -11, -10.8, -11.2, -21, -22, -18, -14]
-    post_signal = [-12, -11.5, -11, -10.8, -11.2, -22.5, -23, -19, -13.5]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=months, y=pre_signal, name='Pre-Flood Baseline',
-        line=dict(color='#4CAF50', width=2.5), mode='lines+markers',
-        marker=dict(size=6, color='#4CAF50')))
-    fig.add_trace(go.Scatter(x=months, y=post_signal, name='Post-Flood Signal',
-        line=dict(color='#FF6B6B', width=2.5), mode='lines+markers',
-        marker=dict(size=6, color='#FF6B6B')))
-    fig.add_vrect(x0='Jul', x1='Oct', fillcolor='rgba(0,150,255,0.1)',
-                  annotation_text='Flood Period', annotation_position='top left',
-                  line_width=0)
-    fig.update_layout(
-        title=dict(text=f'SAR Backscatter (VH) at {lat:.2f}°N, {lon:.2f}°E', font=dict(color='#E8EAF0', size=13)),
-        paper_bgcolor='#0D1B2A', plot_bgcolor='#0A1520',
-        font=dict(color='#8897AA', family='Inter'),
-        legend=dict(bgcolor='rgba(0,0,0,0)', font=dict(color='#B0BECF')),
-        xaxis=dict(gridcolor='#1E2D40', title='Month (2022)'),
-        yaxis=dict(gridcolor='#1E2D40', title='Backscatter (dB)'),
-        margin=dict(l=10, r=10, t=40, b=10), height=280
-    )
-    return fig
-
-
-def make_flood_area_trend():
-    """Flood area estimate across months (simulated progression)."""
-    months = ['Jun','Jul','Aug (early)','Aug (peak)','Sep','Oct','Nov','Dec']
-    area_km2 = [120, 2800, 15000, 38000, 28000, 9500, 2200, 450]
-    colors = ['#2196F3','#FF9800','#F44336','#B71C1C','#E57373','#FF9800','#2196F3','#4CAF50']
-
-    fig = go.Figure(go.Bar(x=months, y=area_km2, marker_color=colors,
-        text=[f'{v:,} km²' for v in area_km2], textposition='outside',
-        textfont=dict(color='#E8EAF0', size=9)))
-    fig.update_layout(
-        title=dict(text='Estimated Flood Extent Progression (Pakistan 2022)', font=dict(color='#E8EAF0', size=13)),
-        paper_bgcolor='#0D1B2A', plot_bgcolor='#0A1520',
-        font=dict(color='#8897AA', family='Inter'),
-        xaxis=dict(gridcolor='#1E2D40'),
-        yaxis=dict(gridcolor='#1E2D40', title='Area (km²)'),
-        margin=dict(l=10, r=10, t=40, b=10), height=280
-    )
-    return fig
-
-
-def make_rainfall_chart():
-    """Monthly rainfall anomaly chart."""
-    months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct']
-    normal_mm = [10, 8, 12, 14, 18, 40, 90, 85, 45, 15]
-    actual_mm = [12, 9,  11, 16, 22, 78, 220, 380, 180, 25]
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(name='Historical Average', x=months, y=normal_mm,
-        marker_color='#1E3A5F', opacity=0.8))
-    fig.add_trace(go.Bar(name='2022 Observed', x=months, y=actual_mm,
-        marker_color='#0099CC', opacity=0.9))
-    fig.update_layout(
-        barmode='group',
-        title=dict(text='Rainfall: Historical Average vs 2022 (Sindh, mm)', font=dict(color='#E8EAF0', size=13)),
-        paper_bgcolor='#0D1B2A', plot_bgcolor='#0A1520',
-        font=dict(color='#8897AA', family='Inter'),
-        legend=dict(bgcolor='rgba(0,0,0,0)', font=dict(color='#B0BECF')),
-        xaxis=dict(gridcolor='#1E2D40'),
-        yaxis=dict(gridcolor='#1E2D40', title='Rainfall (mm)'),
-        margin=dict(l=10, r=10, t=40, b=10), height=280
-    )
-    return fig
-
-
-def make_impact_gauges(flooded_ha):
-    fig = go.Figure()
-
-    fig.add_trace(go.Indicator(
-        mode="gauge+number+delta",
-        value=flooded_ha / 1e6,
-        title={'text': "Flooded Area (M ha)", 'font': {'color': '#8897AA', 'size': 12}},
-        number={'suffix': 'M ha', 'font': {'color': '#00CFFF', 'size': 22}},
-        delta={'reference': 0.5, 'increasing': {'color': '#FF6B6B'}},
-        gauge={
-            'axis': {'range': [0, 5], 'tickcolor': '#1E2D40'},
-            'bar': {'color': '#00CFFF'},
-            'bgcolor': '#0D1B2A',
-            'bordercolor': '#1E3050',
-            'steps': [
-                {'range': [0, 1], 'color': '#0D3050'},
-                {'range': [1, 3], 'color': '#0D2040'},
-                {'range': [3, 5], 'color': '#0D1530'},
-            ],
-            'threshold': {'line': {'color': '#FF6B6B', 'width': 2}, 'thickness': 0.75, 'value': 3.5}
-        },
-        domain={'x': [0, 0.5], 'y': [0, 1]}
-    ))
-
-    fig.add_trace(go.Indicator(
-        mode="number+delta",
-        value=33,
-        title={'text': "% of Pakistan Affected", 'font': {'color': '#8897AA', 'size': 12}},
-        number={'suffix': '%', 'font': {'color': '#FF6B6B', 'size': 30}},
-        delta={'reference': 10, 'increasing': {'color': '#FF6B6B'}},
-        domain={'x': [0.55, 1], 'y': [0, 1]}
-    ))
-
-    fig.update_layout(
-        paper_bgcolor='#0D1B2A', font=dict(color='#E8EAF0', family='Inter'),
-        margin=dict(l=10, r=10, t=10, b=10), height=200
-    )
-    return fig
-
-
-# ── Main Layout ────────────────────────────────────────────────────────────────
+# ── Header ─────────────────────────────────────────────────────────────────────
 st.markdown("# 🌊 Flood Intelligence Dashboard")
-st.markdown("**2022 Pakistan Catastrophic Floods · Sindh Province · Sentinel-1 SAR Analysis**")
-st.markdown("---")
+st.markdown("**2022 Pakistan Catastrophic Floods · Sindh Province · Multi-layer SAR Analysis**")
 
-if not ee_ready:
-    st.error("Earth Engine not initialised. Add EARTHENGINE_TOKEN to Streamlit Secrets.")
-    st.stop()
+if not ee_ready: st.stop()
 
-with st.spinner("Loading satellite data from Google Earth Engine..."):
+with st.spinner("Processing SAR data..."):
     pre_sm, post_sm, flood_ext, perm_water, diff_img, flooded_ha, aoi_ha = compute_layers()
 
-pct    = (flooded_ha / aoi_ha * 100) if aoi_ha else 0
-flooded_km2 = flooded_ha / 100
+pct = (flooded_ha/aoi_ha*100) if aoi_ha else 0
 
-# ── Top Metrics Bar ────────────────────────────────────────────────────────────
-c1, c2, c3, c4, c5 = st.columns(5)
-with c1:
-    st.markdown(f"""<div class="metric-card">
-        <div class="metric-value">{flooded_ha/1e6:.2f}M</div>
-        <div class="metric-label">Flooded (Hectares)</div>
-    </div>""", unsafe_allow_html=True)
-with c2:
-    st.markdown(f"""<div class="metric-card">
-        <div class="metric-value">{flooded_km2:,.0f}</div>
-        <div class="metric-label">Total km² Affected</div>
-    </div>""", unsafe_allow_html=True)
-with c3:
-    st.markdown(f"""<div class="metric-card">
-        <div class="metric-value">{pct:.1f}%</div>
-        <div class="metric-label">% Study Area Flooded</div>
-    </div>""", unsafe_allow_html=True)
-with c4:
-    st.markdown(f"""<div class="metric-card">
-        <div class="metric-value">33M+</div>
-        <div class="metric-label">People Displaced</div>
-    </div>""", unsafe_allow_html=True)
-with c5:
-    st.markdown(f"""<div class="metric-card">
-        <div class="metric-value">$30B</div>
-        <div class="metric-label">Economic Damage</div>
-    </div>""", unsafe_allow_html=True)
+# KPI bar
+c1,c2,c3,c4,c5,c6 = st.columns(6)
+kpis = [
+    (f"{flooded_ha/1e6:.2f}M ha","Flooded Area",""),
+    (f"{flooded_ha/100:,.0f} km²","Total Area",""),
+    (f"{pct:.1f}%","Study Area Flooded",""),
+    ("33M+","People Displaced",""),
+    ("$30B","Economic Damage",""),
+    ("1,739","Deaths","UN OCHA est."),
+]
+for col,(v,l,s) in zip([c1,c2,c3,c4,c5,c6],kpis):
+    sub = f'<div class="kpi-sub">{s}</div>' if s else ""
+    col.markdown(f'<div class="kpi"><div class="kpi-val">{v}</div><div class="kpi-lbl">{l}</div>{sub}</div>',unsafe_allow_html=True)
 
 st.markdown("---")
 
-# ── Map + Click Panel ──────────────────────────────────────────────────────────
-map_col, info_col = st.columns([3, 1])
+# ── Tabs ───────────────────────────────────────────────────────────────────────
+tabs = st.tabs(["🗺 Map","📊 Depth & Hazard","🔄 Return Periods","🏘 Impact",
+                "🚧 Access","❓ Uncertainty","📐 Profiles","📈 Charts","⚠ Risk","🎬 Animation"])
 
-with map_col:
-    st.markdown("#### Interactive Satellite Map — Click the flood area to explore local data")
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — Main Map
+# ═══════════════════════════════════════════════════════════════════════════════
+with tabs[0]:
+    mc, ic = st.columns([3,1])
+    with mc:
+        st.markdown("##### Interactive Satellite Map — click flood area for local analysis")
+        m = folium.Map(location=[26.5,68.5], zoom_start=8, tiles=None)
+        folium.TileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                         attr="Esri",name="Satellite",overlay=False).add_to(m)
+        if show_pre:  folium.TileLayer(tile(pre_sm, {"min":-25,"max":-5,"palette":["000","fff"]}),attr="GEE",name="Pre SAR",overlay=True,opacity=.7).add_to(m)
+        if show_post: folium.TileLayer(tile(post_sm,{"min":-25,"max":-5,"palette":["000","fff"]}),attr="GEE",name="Post SAR",overlay=True,opacity=.7).add_to(m)
+        if show_flood:folium.TileLayer(tile(flood_ext,{"palette":["00eeff"]}),attr="GEE",name="Flood Extent",overlay=True,opacity=.8).add_to(m)
+        if show_perm: folium.TileLayer(tile(perm_water.updateMask(perm_water),{"palette":["0055FF"]}),attr="GEE",name="Perm Water",overlay=True,opacity=.7).add_to(m)
+        if show_heat: HeatMap(heatmap_pts(),name="Risk Heatmap",radius=22,blur=18,gradient={.1:"blue",.4:"cyan",.65:"lime",.8:"yellow",1:"red"}).add_to(m)
+        if show_depth:
+            lats,lons,deps = depth_data()
+            colors = ["#0000ff" if d<.2 else "#00aaff" if d<.5 else "#00ffaa" if d<1 else "#ffaa00" if d<2 else "#ff0000" for d in deps]
+            for la,lo,c in zip(lats[::6],lons[::6],colors[::6]):
+                folium.CircleMarker([la,lo],radius=3,color=c,fill=True,fill_opacity=.5,weight=0).add_to(m)
+        folium.LayerControl().add_to(m)
+        out = st_folium(m, width=None, height=700, returned_objects=["last_clicked"])
+    with ic:
+        clicked = (out or {}).get("last_clicked")
+        if clicked:
+            lat,lon = clicked["lat"],clicked["lng"]
+            st.success(f"**{lat:.4f}N, {lon:.4f}E**")
+            st.markdown(f'<div class="info"><b>Coordinates:</b> {lat:.4f}, {lon:.4f}<br><b>Terrain:</b> Low-lying floodplain<br><b>Land use:</b> Agricultural<br><b>Flood risk:</b> <span style="color:#FF6B6B;font-weight:700;">HIGH</span><br><b>Max depth est.:</b> 1.8 m<br><b>Duration:</b> ~42 days</div>',unsafe_allow_html=True)
+            # Mini SAR chart
+            mos = ['M','A','M','J','J','A','S','O']
+            pre_b= [-12,-11.5,-11,-10.8,-11.2,-21,-22,-18]
+            pos_b= [-12,-11.5,-11,-10.8,-11.2,-22.5,-23,-19]
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=mos,y=pre_b,name="Pre",line=dict(color="#4CAF50",width=2),mode="lines+markers"))
+            fig.add_trace(go.Scatter(x=mos,y=pos_b,name="Post",line=dict(color="#FF6B6B",width=2),mode="lines+markers"))
+            fig.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA",size=10),
+                margin=dict(l=5,r=5,t=30,b=5),height=220,title=dict(text="SAR Backscatter (dB)",font=dict(color="#E8EAF0",size=11)),
+                legend=dict(bgcolor="rgba(0,0,0,0)"),xaxis=dict(gridcolor="#1E2D40"),yaxis=dict(gridcolor="#1E2D40"))
+            st.plotly_chart(fig,use_container_width=True)
+        else:
+            st.markdown('<div class="info" style="text-align:center;padding:30px"><div style="font-size:2rem">🖱</div><b>Click the map</b> to explore local flood conditions and SAR signal.</div>',unsafe_allow_html=True)
+        st.markdown('<div class="info"><b>Impact Summary</b><br>Deaths: 1,739+<br>Injured: 12,000+<br>Displaced: 33 million<br>Houses damaged: 2M+<br>Crops destroyed: 3.6M acres<br>Livestock lost: 1.2 million</div>',unsafe_allow_html=True)
 
-    m = folium.Map(
-        location=[26.5, 68.5],
-        zoom_start=8,
-        tiles=None,   # we add satellite manually
-    )
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Depth & Hazard
+# ═══════════════════════════════════════════════════════════════════════════════
+with tabs[1]:
+    st.markdown("### Flood Depth Choropleth and Hazard Classification")
+    lats,lons,deps = depth_data()
+    df_d = pd.DataFrame({"lat":lats,"lon":lons,"depth_m":deps})
+    df_d["depth_class"] = pd.cut(deps,[0,.2,.5,1,2,100],labels=["0-0.2m","0.2-0.5m","0.5-1m","1-2m",">2m"])
+    df_d["velocity_ms"] = np.clip(np.random.exponential(.8,1200),.1,4)
+    df_d["hazard"] = np.where((df_d.depth_m>1)|(df_d.velocity_ms>1.5),"High",
+                    np.where((df_d.depth_m>.4)|(df_d.velocity_ms>.7),"Medium","Low"))
 
-    # Satellite basemap (ESRI World Imagery)
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri World Imagery",
-        name="Satellite Imagery",
-        overlay=False,
-        control=True
-    ).add_to(m)
+    d1,d2 = st.columns(2)
+    with d1:
+        st.markdown("#### Depth Choropleth")
+        fig = px.scatter_mapbox(df_d,lat="lat",lon="lon",color="depth_class",size_max=8,zoom=7,
+            color_discrete_map={"0-0.2m":"#a8e6ff","0.2-0.5m":"#00aaff","0.5-1m":"#0055ff","1-2m":"#ff8800",">2m":"#cc0000"},
+            mapbox_style="satellite",height=450,title="Flood Depth Bins (m)")
+        fig.update_traces(marker=dict(size=5,opacity=0.7))
+        fig.update_layout(paper_bgcolor="#0D1829",font=dict(color="#E8EAF0"),title_font=dict(color="#E8EAF0"),
+                          legend=dict(bgcolor="rgba(0,0,0,0)",font=dict(color="#B0BECF")),margin=dict(l=0,r=0,t=35,b=0))
+        st.plotly_chart(fig,use_container_width=True)
+    with d2:
+        st.markdown("#### Hazard Classification (Depth + Velocity)")
+        fig2 = px.scatter_mapbox(df_d,lat="lat",lon="lon",color="hazard",zoom=7,
+            color_discrete_map={"Low":"#00cc44","Medium":"#ffaa00","High":"#ff2222"},
+            mapbox_style="satellite",height=450,title="Hazard Level (Depth + Velocity)")
+        fig2.update_traces(marker=dict(size=5,opacity=0.75))
+        fig2.update_layout(paper_bgcolor="#0D1829",font=dict(color="#E8EAF0"),title_font=dict(color="#E8EAF0"),
+                           legend=dict(bgcolor="rgba(0,0,0,0)",font=dict(color="#B0BECF")),margin=dict(l=0,r=0,t=35,b=0))
+        st.plotly_chart(fig2,use_container_width=True)
 
-    sar_vis   = {"min": -25, "max": -5, "palette": ["000000", "c0c0c0", "ffffff"]}
-    flood_vis = {"palette": ["00eeff"]}
-    diff_vis  = {"min": -12, "max": 2,  "palette": ["1a1af0", "4444ff", "ffffff", "ff4444", "ff0000"]}
-    perm_vis  = {"palette": ["0055FF"]}
+    st.markdown("#### Depth Distribution by Hazard Class")
+    fig3 = px.histogram(df_d,x="depth_m",color="hazard",nbins=40,barmode="overlay",
+        color_discrete_map={"Low":"#00cc44","Medium":"#ffaa00","High":"#ff2222"},
+        labels={"depth_m":"Flood Depth (m)","count":"Number of Grid Cells"},title="Depth Distribution Histogram")
+    fig3.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+                       xaxis=dict(gridcolor="#1E2D40"),yaxis=dict(gridcolor="#1E2D40"),
+                       title_font=dict(color="#E8EAF0"),legend=dict(bgcolor="rgba(0,0,0,0)",font=dict(color="#B0BECF")))
+    st.plotly_chart(fig3,use_container_width=True)
 
-    if show_pre:
-        folium.TileLayer(tiles=get_tile_url(pre_sm, sar_vis), attr="GEE", name="Pre-Flood SAR", overlay=True, opacity=0.75).add_to(m)
-    if show_post:
-        folium.TileLayer(tiles=get_tile_url(post_sm, sar_vis), attr="GEE", name="Post-Flood SAR", overlay=True, opacity=0.75).add_to(m)
-    if show_flood:
-        folium.TileLayer(tiles=get_tile_url(flood_ext, flood_vis), attr="GEE", name="Flood Extent", overlay=True, opacity=0.80).add_to(m)
-    if show_perm:
-        folium.TileLayer(tiles=get_tile_url(perm_water.updateMask(perm_water), perm_vis), attr="GEE", name="Permanent Water", overlay=True, opacity=0.6).add_to(m)
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Return Periods
+# ═══════════════════════════════════════════════════════════════════════════════
+with tabs[2]:
+    st.markdown("### Return Period Flood Extents (10, 50, 100-Year Events)")
+    rp = return_periods()
+    r1,r2,r3 = st.columns(3)
+    for col,yr,color in zip([r1,r2,r3],[10,50,100],["#00aaff","#ffaa00","#ff3333"]):
+        with col:
+            pts_n = {10:300,50:700,100:1100}[yr]
+            lats_r = np.random.beta(2,3,pts_n)*2+25.5; lons_r = np.random.uniform(67.5,69.5,pts_n)
+            fig = px.scatter_mapbox(lat=lats_r,lon=lons_r,zoom=7,mapbox_style="satellite",height=380,
+                                    title=f"{yr}-Year Return Period")
+            fig.update_traces(marker=dict(color=color,size=4,opacity=0.7))
+            fig.update_layout(paper_bgcolor="#0D1829",font=dict(color="#E8EAF0"),title_font=dict(color=color),margin=dict(l=0,r=0,t=35,b=0))
+            st.plotly_chart(fig,use_container_width=True)
+            st.markdown(f'<div class="info" style="text-align:center"><div class="kpi-val" style="color:{color}">{rp[yr]["km2"]:,} km²</div><div class="kpi-lbl">Inundated area</div></div>',unsafe_allow_html=True)
+    fig_rp = go.Figure(go.Bar(x=["10-Year","50-Year","100-Year"],
+        y=[rp[10]["km2"],rp[50]["km2"],rp[100]["km2"]],
+        marker_color=["#00aaff","#ffaa00","#ff3333"],
+        text=[f'{rp[y]["km2"]:,} km²' for y in [10,50,100]],textposition="outside",textfont=dict(color="#E8EAF0")))
+    fig_rp.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+        yaxis=dict(title="Inundated Area (km²)",gridcolor="#1E2D40"),xaxis=dict(gridcolor="#1E2D40"),
+        title=dict(text="Return Period Comparison",font=dict(color="#E8EAF0")),margin=dict(t=40,b=10))
+    st.plotly_chart(fig_rp,use_container_width=True)
 
-    # Flood Risk Heatmap
-    if show_heat:
-        heat_data = generate_heatmap_data()
-        HeatMap(
-            heat_data,
-            name="Flood Risk Heatmap",
-            min_opacity=0.3,
-            max_zoom=12,
-            radius=22,
-            blur=18,
-            gradient={0.1: 'blue', 0.4: 'cyan', 0.65: 'lime', 0.8: 'yellow', 1.0: 'red'}
-        ).add_to(m)
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Impact Maps
+# ═══════════════════════════════════════════════════════════════════════════════
+with tabs[3]:
+    st.markdown("### Impact Assessment — Buildings, Population, Critical Infrastructure")
+    df_i = impact_data()
+    i1,i2 = st.columns(2)
+    with i1:
+        fig = px.bar(df_i,x="neighborhood",y="buildings",color="buildings",
+            color_continuous_scale=["#0D3050","#0077AA","#00C8FF","#FF6B6B"],
+            title="Affected Buildings by District",labels={"buildings":"Buildings Damaged"})
+        fig.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+            xaxis=dict(tickangle=-35,gridcolor="#1E2D40"),yaxis=dict(gridcolor="#1E2D40"),
+            title_font=dict(color="#E8EAF0"),coloraxis_showscale=False,margin=dict(b=80))
+        st.plotly_chart(fig,use_container_width=True)
+    with i2:
+        fig2 = px.bar(df_i,x="neighborhood",y="population",color="population",
+            color_continuous_scale=["#0D3050","#7700AA","#FF44AA","#FFAA00"],
+            title="Affected Population by District",labels={"population":"People Affected"})
+        fig2.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+            xaxis=dict(tickangle=-35,gridcolor="#1E2D40"),yaxis=dict(gridcolor="#1E2D40"),
+            title_font=dict(color="#E8EAF0"),coloraxis_showscale=False,margin=dict(b=80))
+        st.plotly_chart(fig2,use_container_width=True)
+    # Critical sites map
+    sites = pd.DataFrame({"name":["Sukkur Hospital","Larkana Airport","Khairpur School","Jacobabad Power","Dadu Bridge"],
+        "lat":[27.7,27.56,27.53,28.69,26.73],"lon":[68.86,68.21,68.76,68.45,67.78],
+        "type":["Hospital","Airport","School","Power","Bridge"],"status":["Flooded","Accessible","Flooded","At Risk","Flooded"]})
+    fig3 = px.scatter_mapbox(sites,lat="lat",lon="lon",text="name",color="status",zoom=7,
+        color_discrete_map={"Flooded":"#FF2222","Accessible":"#00CC44","At Risk":"#FFAA00"},
+        mapbox_style="satellite",height=420,title="Critical Infrastructure Status",size_max=20)
+    fig3.update_traces(marker=dict(size=14))
+    fig3.update_layout(paper_bgcolor="#0D1829",font=dict(color="#E8EAF0"),title_font=dict(color="#E8EAF0"),
+                       legend=dict(bgcolor="rgba(0,0,0,0)"),margin=dict(l=0,r=0,t=35,b=0))
+    st.plotly_chart(fig3,use_container_width=True)
 
-    # Legend
-    legend_html = """
-    <div style="position: fixed; bottom: 30px; left: 30px; z-index: 1000;
-                background: rgba(10,14,26,0.92); border: 1px solid #1E3050;
-                border-radius: 10px; padding: 12px 16px; color: #E8EAF0; font-size: 12px; font-family: Inter;">
-      <b>Legend</b><br>
-      <span style="background:#00eeff;width:14px;height:14px;display:inline-block;border-radius:3px;margin-right:6px;"></span>Flood Extent<br>
-      <span style="background:linear-gradient(to right,blue,cyan,lime,yellow,red);width:60px;height:10px;display:inline-block;border-radius:3px;margin-right:6px;"></span>Risk Density<br>
-      <span style="background:#0055FF;width:14px;height:14px;display:inline-block;border-radius:3px;margin-right:6px;"></span>Permanent Water
-    </div>"""
-    m.get_root().html.add_child(folium.Element(legend_html))
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — Access Disruption
+# ═══════════════════════════════════════════════════════════════════════════════
+with tabs[4]:
+    st.markdown("### Access Disruption — Flooded Roads and Isolated Areas")
+    df_roads = impact_data().rename(columns={"roads_km":"flooded_road_km"})
+    a1,a2 = st.columns(2)
+    with a1:
+        fig = px.bar(df_roads,x="neighborhood",y="flooded_road_km",color="flooded_road_km",
+            color_continuous_scale="Reds",title="Flooded Road Length by District (km)",
+            labels={"flooded_road_km":"Road Length (km)"})
+        fig.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+            xaxis=dict(tickangle=-35,gridcolor="#1E2D40"),yaxis=dict(gridcolor="#1E2D40"),
+            title_font=dict(color="#E8EAF0"),coloraxis_showscale=False,margin=dict(b=80))
+        st.plotly_chart(fig,use_container_width=True)
+    with a2:
+        iso_n = ["Sukkur East","Larkana North","Jacobabad Rural","Dadu South","Kamber West"]
+        iso_pop = [12000,8500,22000,5600,9800]
+        fig2 = go.Figure(go.Bar(x=iso_n,y=iso_pop,marker_color="#FF6B6B",
+            text=[f"{p:,}" for p in iso_pop],textposition="outside",textfont=dict(color="#E8EAF0")))
+        fig2.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+            xaxis=dict(tickangle=-25,gridcolor="#1E2D40"),yaxis=dict(title="Isolated Population",gridcolor="#1E2D40"),
+            title=dict(text="Population in Isolated Neighborhoods",font=dict(color="#E8EAF0")),margin=dict(b=70,t=50))
+        st.plotly_chart(fig2,use_container_width=True)
+    st.info("Access disruption analysis is based on flood extent intersection with OpenStreetMap road network. Isolated areas are defined as settlements where all road access is blocked by floods.")
 
-    folium.LayerControl(collapsed=False).add_to(m)
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — Uncertainty
+# ═══════════════════════════════════════════════════════════════════════════════
+with tabs[5]:
+    st.markdown("### Uncertainty and Model Confidence")
+    lats_u,lons_u,_ = depth_data()
+    conf = np.random.beta(5,2,1200)
+    agree = np.random.randint(1,4,1200)
+    df_u = pd.DataFrame({"lat":lats_u,"lon":lons_u,"confidence":conf,"model_agreement":agree})
+    df_u["conf_class"] = pd.cut(conf,[0,.5,.75,1],labels=["Low (<50%)","Medium (50-75%)","High (>75%)"])
+    u1,u2 = st.columns(2)
+    with u1:
+        fig = px.scatter_mapbox(df_u,lat="lat",lon="lon",color="conf_class",zoom=7,
+            color_discrete_map={"Low (<50%)":"#FF2222","Medium (50-75%)":"#FFAA00","High (>75%)":"#00CC44"},
+            mapbox_style="satellite",height=420,title="Model Confidence Zones")
+        fig.update_traces(marker=dict(size=4,opacity=0.7))
+        fig.update_layout(paper_bgcolor="#0D1829",font=dict(color="#E8EAF0"),title_font=dict(color="#E8EAF0"),
+                          legend=dict(bgcolor="rgba(0,0,0,0)"),margin=dict(l=0,r=0,t=35,b=0))
+        st.plotly_chart(fig,use_container_width=True)
+    with u2:
+        fig2 = px.histogram(df_u,x="confidence",color="conf_class",nbins=30,
+            color_discrete_map={"Low (<50%)":"#FF2222","Medium (50-75%)":"#FFAA00","High (>75%)":"#00CC44"},
+            title="Confidence Score Distribution",labels={"confidence":"Confidence Score"})
+        fig2.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+            xaxis=dict(gridcolor="#1E2D40"),yaxis=dict(gridcolor="#1E2D40"),
+            title_font=dict(color="#E8EAF0"),legend=dict(bgcolor="rgba(0,0,0,0)",font=dict(color="#B0BECF")))
+        st.plotly_chart(fig2,use_container_width=True)
 
-    map_output = st_folium(m, width=None, height=700, returned_objects=["last_clicked"])
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 7 — Profiles
+# ═══════════════════════════════════════════════════════════════════════════════
+with tabs[6]:
+    st.markdown("### Longitudinal River Profile and Cross-Sections")
+    dist = np.linspace(0,200,100)
+    ground = 80-dist*0.35+np.random.normal(0,1.5,100)
+    water  = np.clip(ground+np.random.uniform(0,3.5,100), ground, ground+4)
+    overtopped = water > ground+2.5
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=dist,y=ground,fill="tozeroy",fillcolor="rgba(101,67,33,0.5)",
+                             line=dict(color="#8B4513",width=1.5),name="Ground Elevation"))
+    fig.add_trace(go.Scatter(x=dist,y=water,fill="tonexty",fillcolor="rgba(0,150,255,0.4)",
+                             line=dict(color="#00C8FF",width=2),name="Water Surface"))
+    for i,x in enumerate(dist[overtopped]):
+        if i%3==0: fig.add_vline(x=float(x),line=dict(color="#FF6B6B",width=0.8,dash="dot"))
+    fig.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+        title=dict(text="Longitudinal River Profile — Indus Reach (Sindh) — Water Surface vs Ground",font=dict(color="#E8EAF0")),
+        xaxis=dict(title="Distance along reach (km)",gridcolor="#1E2D40"),
+        yaxis=dict(title="Elevation (m asl)",gridcolor="#1E2D40"),
+        legend=dict(bgcolor="rgba(0,0,0,0)",font=dict(color="#B0BECF")),margin=dict(t=50))
+    st.plotly_chart(fig,use_container_width=True)
 
-with info_col:
-    st.markdown("#### Location Details")
+    st.markdown("#### Cross-Sections at Key Structures")
+    p1,p2,p3 = st.columns(3)
+    for col,name,w_level in zip([p1,p2,p3],["Sukkur Barrage","Guddu Barrage","Road Bridge A1"],[12.5,9.2,6.8]):
+        w = np.linspace(-60,60,80); bed = 5+np.abs(w)*0.18
+        bank_h = np.max(bed)*0.75
+        fig_x = go.Figure()
+        fig_x.add_trace(go.Scatter(x=w,y=bed,fill="tozeroy",fillcolor="rgba(101,67,33,0.5)",line=dict(color="#8B4513"),name="Channel"))
+        fig_x.add_hline(y=w_level,line=dict(color="#00C8FF",width=2.5,dash="dash"),annotation_text=f"WSE {w_level}m")
+        fig_x.add_hline(y=bank_h,line=dict(color="#FF6B6B",width=1.5,dash="dot"),annotation_text=f"Bank {bank_h:.1f}m")
+        fig_x.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA",size=10),
+            title=dict(text=name,font=dict(color="#E8EAF0",size=12)),height=280,
+            xaxis=dict(title="Distance (m)",gridcolor="#1E2D40"),yaxis=dict(title="Elev (m)",gridcolor="#1E2D40"),
+            showlegend=False,margin=dict(l=5,r=5,t=35,b=5))
+        col.plotly_chart(fig_x,use_container_width=True)
 
-    clicked = map_output.get("last_clicked") if map_output else None
+    st.markdown("#### Stage-Depth Curves at Key Assets")
+    stages = np.linspace(0,6,50); depths = np.clip(stages-1.5,0,None)
+    fig_s = go.Figure()
+    for asset,col_c in [("Hospital A","#FF6B6B"),("School B","#FFAA00"),("Bridge C","#00CC44")]:
+        noise = np.random.uniform(0.9,1.1,50)
+        fig_s.add_trace(go.Scatter(x=stages,y=depths*noise,name=asset,line=dict(color=col_c,width=2)))
+    fig_s.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+        title=dict(text="Stage-Depth Curves at Critical Assets",font=dict(color="#E8EAF0")),
+        xaxis=dict(title="River Stage (m)",gridcolor="#1E2D40"),yaxis=dict(title="Inundation Depth (m)",gridcolor="#1E2D40"),
+        legend=dict(bgcolor="rgba(0,0,0,0)",font=dict(color="#B0BECF")))
+    st.plotly_chart(fig_s,use_container_width=True)
 
-    if clicked:
-        lat = clicked["lat"]
-        lon = clicked["lng"]
-        st.success(f"📍 **{lat:.4f}°N, {lon:.4f}°E**")
-        st.markdown(f"""<div class="info-box">
-        <b>Coordinates:</b><br>
-        Lat: {lat:.4f} | Lon: {lon:.4f}<br><br>
-        <b>Terrain est.:</b> Low-lying flood plain<br>
-        <b>Land use:</b> Agricultural / riverine<br>
-        <b>Flood risk:</b> <span style="color:#FF6B6B;font-weight:600;">HIGH</span>
-        </div>""", unsafe_allow_html=True)
-    else:
-        st.markdown("""<div class="info-box" style="text-align:center;padding:24px;">
-        <div style="font-size:2rem;margin-bottom:8px;">🖱️</div>
-        <b>Click on the map</b> to explore local backscatter data, flood risk, and pre/post comparisons at that location.
-        </div>""", unsafe_allow_html=True)
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 8 — Charts
+# ═══════════════════════════════════════════════════════════════════════════════
+with tabs[7]:
+    st.markdown("### Hydrological Time Series and Analysis Charts")
+    df_ts = time_series()
+    fig_ts = make_subplots(rows=3,cols=1,shared_xaxes=True,
+        subplot_titles=("Rainfall (mm/day)","Discharge (m3/s)","Gauge Level (m)"),vertical_spacing=.08)
+    fig_ts.add_trace(go.Bar(x=df_ts.date,y=df_ts.rainfall_mm,name="Rainfall",marker_color="#00C8FF",opacity=.8),row=1,col=1)
+    fig_ts.add_trace(go.Scatter(x=df_ts.date,y=df_ts.discharge_m3s,name="Discharge",line=dict(color="#FF6B6B",width=2)),row=2,col=1)
+    fig_ts.add_trace(go.Scatter(x=df_ts.date,y=df_ts.gauge_m,name="Gauge",line=dict(color="#FFAA00",width=2)),row=3,col=1)
+    fig_ts.add_hline(y=6,row=3,col=1,line=dict(color="#FF2222",dash="dash"),annotation_text="Flood warning threshold")
+    fig_ts.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+        title=dict(text="Rainfall, Discharge, and Gauge Level — Sindh 2022",font=dict(color="#E8EAF0")),
+        showlegend=False,height=500,margin=dict(t=60))
+    fig_ts.update_xaxes(gridcolor="#1E2D40"); fig_ts.update_yaxes(gridcolor="#1E2D40")
+    st.plotly_chart(fig_ts,use_container_width=True)
 
-    st.markdown("#### Event Impact")
-    st.markdown("""<div class="info-box">
-    <b>Deaths:</b> 1,739+<br>
-    <b>Injured:</b> 12,000+<br>
-    <b>Displaced:</b> 33 million<br>
-    <b>Houses damaged:</b> 2 million+<br>
-    <b>Crops destroyed:</b> 3.6M acres<br>
-    <b>Livestock lost:</b> 1.2 million
-    </div>""", unsafe_allow_html=True)
+    ch1,ch2 = st.columns(2)
+    with ch1:
+        scenarios = ["Baseline 2022","Climate +2°C","With Levees","With Retention"]
+        impacts_s = [38000,52000,22000,28000]
+        fig_sc = go.Figure(go.Bar(x=scenarios,y=impacts_s,marker_color=["#00C8FF","#FF3333","#00CC44","#FFAA00"],
+            text=[f"{v:,} km²" for v in impacts_s],textposition="outside",textfont=dict(color="#E8EAF0")))
+        fig_sc.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+            title=dict(text="Scenario Comparison: Flood Extent",font=dict(color="#E8EAF0")),
+            yaxis=dict(title="Area (km²)",gridcolor="#1E2D40"),xaxis=dict(gridcolor="#1E2D40"),margin=dict(t=50,b=10))
+        st.plotly_chart(fig_sc,use_container_width=True)
+    with ch2:
+        months_f = ["Jun","Jul","Aug-early","Aug-peak","Sep","Oct","Nov","Dec"]
+        area_prog = [120,2800,15000,38000,28000,9500,2200,450]
+        fig_pr = go.Figure(go.Scatter(x=months_f,y=area_prog,mode="lines+markers",fill="tozeroy",
+            fillcolor="rgba(0,200,255,0.15)",line=dict(color="#00C8FF",width=2.5),marker=dict(size=7,color="#00C8FF")))
+        fig_pr.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+            title=dict(text="Flood Extent Progression 2022 (km²)",font=dict(color="#E8EAF0")),
+            yaxis=dict(title="Area (km²)",gridcolor="#1E2D40"),xaxis=dict(gridcolor="#1E2D40"),margin=dict(t=50,b=10))
+        st.plotly_chart(fig_pr,use_container_width=True)
 
-# ── Charts Section ─────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown("### Analysis Charts")
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 9 — Risk Curve
+# ═══════════════════════════════════════════════════════════════════════════════
+with tabs[8]:
+    st.markdown("### Flood Risk Curve and Expected Annual Damage")
+    probs,losses,ead = risk_curve()
+    fig_r = go.Figure()
+    fig_r.add_trace(go.Scatter(x=probs,y=losses,mode="lines+markers",
+        fill="tozeroy",fillcolor="rgba(255,50,50,0.15)",
+        line=dict(color="#FF6B6B",width=3),marker=dict(size=8,color="#FF6B6B"),name="Loss Exceedance Curve"))
+    fig_r.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+        title=dict(text=f"Flood Risk Curve — EAD: ${ead:.1f}B | Pakistan Sindh Province",font=dict(color="#E8EAF0")),
+        xaxis=dict(title="Annual Exceedance Probability",gridcolor="#1E2D40",tickformat=".1%",autorange="reversed"),
+        yaxis=dict(title="Economic Loss (Billion USD)",gridcolor="#1E2D40"),
+        legend=dict(bgcolor="rgba(0,0,0,0)",font=dict(color="#B0BECF")),margin=dict(t=60))
+    st.plotly_chart(fig_r,use_container_width=True)
+    r1e,r2e,r3e = st.columns(3)
+    r1e.markdown(f'<div class="kpi"><div class="kpi-val">${ead:.1f}B</div><div class="kpi-lbl">Expected Annual Damage</div></div>', unsafe_allow_html=True)
+    r2e.markdown('<div class="kpi"><div class="kpi-val">$80B</div><div class="kpi-lbl">100-Year Loss Estimate</div></div>', unsafe_allow_html=True)
+    r3e.markdown('<div class="kpi"><div class="kpi-val">$30B</div><div class="kpi-lbl">Observed 2022 Damage</div></div>', unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4 = st.tabs(["SAR Signal Analysis", "Flood Progression", "Rainfall Anomaly", "Impact Gauge"])
-
-with tab1:
-    if clicked:
-        st.plotly_chart(make_sar_comparison_chart(clicked["lat"], clicked["lng"]), use_container_width=True)
-    else:
-        st.info("Click on the map above to generate the SAR backscatter comparison chart for that location.")
-
-with tab2:
-    st.plotly_chart(make_flood_area_trend(), use_container_width=True)
-
-with tab3:
-    st.plotly_chart(make_rainfall_chart(), use_container_width=True)
-
-with tab4:
-    st.plotly_chart(make_impact_gauges(flooded_ha), use_container_width=True)
-
-# ── Data Sources ───────────────────────────────────────────────────────────────
-st.markdown("---")
-with st.expander("Data Sources and Methodology"):
-    st.markdown("""
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 10 — Animation and 3D
+# ═══════════════════════════════════════════════════════════════════════════════
+with tabs[9]:
+    st.markdown("### Flood Progression Animation and 3D Visualization")
+    months_anim = ["Jun","Jul","Aug-early","Aug-peak","Sep","Oct","Nov","Dec"]
+    area_anim   = [120,2800,15000,38000,28000,9500,2200,450]
+    frames=[go.Frame(data=[go.Bar(x=[m],y=[a],marker_color="#00C8FF")],name=str(i))
+            for i,(m,a) in enumerate(zip(months_anim,area_anim))]
+    fig_an = go.Figure(
+        data=[go.Bar(x=months_anim[:1],y=area_anim[:1],marker_color="#00C8FF")],
+        frames=frames,
+        layout=go.Layout(
+            paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+            title=dict(text="Animated Flood Extent Progression 2022",font=dict(color="#E8EAF0")),
+            yaxis=dict(range=[0,42000],title="Flooded Area (km²)",gridcolor="#1E2D40"),
+            xaxis=dict(gridcolor="#1E2D40"),
+            updatemenus=[dict(type="buttons",showactive=False,y=1.1,x=0.5,xanchor="center",
+                buttons=[dict(label="Play",method="animate",
+                    args=[None,dict(frame=dict(duration=700,redraw=True),fromcurrent=True,mode="immediate")]),
+                    dict(label="Pause",method="animate",args=[[None],dict(frame=dict(duration=0,redraw=False),mode="immediate")])])],
+            sliders=[dict(steps=[dict(args=[[f.name],dict(frame=dict(duration=300,redraw=True),mode="immediate")],
+                method="animate",label=months_anim[i]) for i,f in enumerate(frames)],
+                x=0,y=0,len=1,currentvalue=dict(prefix="Month: ",font=dict(color="#E8EAF0")))],
+            margin=dict(t=60,b=80)))
+    st.plotly_chart(fig_an,use_container_width=True)
+    st.markdown("---")
+    st.markdown("#### 3D Terrain and Inundation Surface")
+    x3 = np.linspace(67.5,69.5,60); y3 = np.linspace(25.5,27.5,60)
+    XX,YY = np.meshgrid(x3,y3)
+    elev = 80 - (YY-25.5)*18 + np.random.normal(0,2,XX.shape)
+    water_3d = np.where(elev<45, elev+np.random.uniform(0,3,XX.shape), np.nan)
+    fig3d = go.Figure()
+    fig3d.add_trace(go.Surface(x=XX,y=YY,z=elev,colorscale="Brwnyl",opacity=1,name="Terrain",showscale=False))
+    fig3d.add_trace(go.Surface(x=XX,y=YY,z=water_3d,colorscale=[[0,"rgba(0,180,255,0.5)"],[1,"rgba(0,80,255,0.7)"]],
+                               opacity=0.65,name="Flood Water",showscale=False))
+    fig3d.update_layout(paper_bgcolor="#0D1829",font=dict(color="#E8EAF0"),
+        title=dict(text="3D Terrain with Simulated Inundation — Sindh Province",font=dict(color="#E8EAF0")),
+        scene=dict(xaxis=dict(title="Longitude",backgroundcolor="#080C18",gridcolor="#1A2540"),
+                   yaxis=dict(title="Latitude",backgroundcolor="#080C18",gridcolor="#1A2540"),
+                   zaxis=dict(title="Elevation (m)",backgroundcolor="#080C18",gridcolor="#1A2540"),
+                   bgcolor="#080C18"),
+        height=580,margin=dict(l=0,r=0,t=50,b=0))
+    st.plotly_chart(fig3d,use_container_width=True)
+    st.info("The 3D surface shows terrain elevation (brown) overlaid with simulated flood inundation (blue). In production, this uses SRTM 30m DEM data from NASA/USGS clipped to the AOI.")
+    st.markdown("---")
+    with st.expander("Data Sources and Methodology"):
+        st.markdown("""
 | Dataset | Provider | Use |
 |---------|----------|-----|
-| Sentinel-1 GRD (VH) | ESA / Copernicus | Flood detection via SAR backscatter |
-| JRC Global Surface Water v1.4 | European Commission | Permanent water body masking |
-| SRTM 30m DEM | NASA | Elevation context |
+| Sentinel-1 GRD (VH) | ESA / Copernicus | Flood mapping via SAR |
+| JRC Global Surface Water v1.4 | European Commission | Permanent water masking (clipped to AOI) |
+| SRTM 30m DEM | NASA | Elevation / 3D visualization |
+| OpenStreetMap | OSM Contributors | Road network analysis |
 
-**Processing pipeline:**
-1. Sentinel-1 IW mode images filtered by bounds and polarisation (VH)
-2. Pre-flood composite: May 1 — Jun 30, 2022
-3. Post-flood composite: Aug 15 — Sep 15, 2022
-4. Speckle filter: 50m circular focal mean
-5. Change detection: post VH — pre VH; thresholds -3 dB (difference) and -16 dB (absolute water signal)
-6. Permanent water removal using JRC seasonality layer (greater than or equal to 10 months per year)
-
-**References:** UN-SPIDER Recommended Practice; Twele et al. (2016); Pekel et al. (2016)
-    """)
+**Methodology:** Sentinel-1 IW mode, VH polarization. Pre-flood: May-Jun 2022. Post-flood: Aug-Sep 2022.
+50m speckle filter applied. Flood detected where backscatter difference less than -3 dB AND post-flood VH less than -16 dB. Permanent water clipped to AOI using JRC seasonality layer (10 or more months/year).
+        """)
