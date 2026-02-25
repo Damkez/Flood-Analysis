@@ -91,6 +91,15 @@ def return_periods():
     rp = {10:{"ha":120000,"km2":1200},50:{"ha":290000,"km2":2900},100:{"ha":450000,"km2":4500}}
     return rp
 
+def get_district(lat, lon):
+    """Map approximate lat/lon to Sindh district."""
+    if lat > 27.3: return "Kashmore"
+    if lat > 26.9: return "Jacobabad" if lon < 68.4 else "Ghotki"
+    if lat > 26.5: return "Kamber" if lon < 68.0 else "Sukkur" if lon < 68.9 else "Khairpur"
+    if lat > 26.1: return "Larkana" if lon < 68.2 else "Naushahro Feroze"
+    if lat > 25.8: return "Dadu" if lon < 67.8 else "Sanghar"
+    return "Thatta" if lon < 68.5 else "Badin"
+
 def impact_data():
     hoods = ["Sukkur","Larkana","Jacobabad","Khairpur","Shikarpur","Dadu","Kamber","Naushahro Feroze"]
     bldgs = np.random.randint(800,15000,8); pop = bldgs*np.random.uniform(4.2,5.8,8)
@@ -201,8 +210,9 @@ with tabs[0]:
             est_depth = round(risk_score * 2.8, 1)
             est_duration = int(risk_score * 60)
             conf_score = int(70 + risk_score*20)
+            district = get_district(lat, lon)
             st.success(f"**{lat:.4f}N, {lon:.4f}E**")
-            st.markdown(f'<div class="info"><b>Coordinates:</b> {lat:.4f}, {lon:.4f}<br><b>Terrain:</b> Low-lying floodplain<br><b>Land use:</b> Agricultural/riverine<br><b>Flood risk:</b> <span style="color:{risk_color};font-weight:700;">{risk_label}</span><br><b>Risk score:</b> {risk_score:.2f}/1.0<br><b>Max depth est.:</b> {est_depth} m<br><b>Duration est.:</b> ~{est_duration} days<br><b>Confidence:</b> {conf_score}%<br><b>Admin unit:</b> Sindh Province</div>',unsafe_allow_html=True)
+            st.markdown(f'<div class="info"><b>Coordinates:</b> {lat:.4f}, {lon:.4f}<br><b>District:</b> {district}<br><b>Province:</b> Sindh<br><b>Terrain:</b> Low-lying floodplain<br><b>Land use:</b> Agricultural/riverine<br><b>Flood risk:</b> <span style="color:{risk_color};font-weight:700;">{risk_label}</span><br><b>Risk score:</b> {risk_score:.2f}/1.0<br><b>Max depth est.:</b> {est_depth} m<br><b>Duration est.:</b> ~{est_duration} days<br><b>Confidence:</b> {conf_score}%</div>',unsafe_allow_html=True)
             # Mini SAR chart
             mos = ['M','A','M','J','J','A','S','O']
             pre_b= [-12,-11.5,-11,-10.8,-11.2,-21,-22,-18]
@@ -265,25 +275,29 @@ with tabs[1]:
 with tabs[2]:
     st.markdown("### Return Period Flood Extents (10, 50, 100-Year Events)")
     rp = return_periods()
-    r1,r2,r3 = st.columns(3)
-    for col,yr,color in zip([r1,r2,r3],[10,50,100],["#00aaff","#ffaa00","#ff3333"]):
-        with col:
-            pts_n = {10:300,50:700,100:1100}[yr]
-            lats_r = np.random.beta(2,3,pts_n)*2+25.5; lons_r = np.random.uniform(67.5,69.5,pts_n)
-            fig = px.scatter_mapbox(lat=lats_r,lon=lons_r,zoom=7,mapbox_style="carto-darkmatter",height=380,
-                                    title=f"{yr}-Year Return Period")
-            fig.update_traces(marker=dict(color=color,size=5,opacity=0.75))
-            fig.update_layout(paper_bgcolor="#0D1829",font=dict(color="#E8EAF0"),title_font=dict(color=color),margin=dict(l=0,r=0,t=35,b=0))
-            st.plotly_chart(fig,use_container_width=True)
-            st.markdown(f'<div class="info" style="text-align:center"><div class="kpi-val" style="color:{color}">{rp[yr]["km2"]:,} km²</div><div class="kpi-lbl">Inundated area</div></div>',unsafe_allow_html=True)
-    fig_rp = go.Figure(go.Bar(x=["10-Year","50-Year","100-Year"],
-        y=[rp[10]["km2"],rp[50]["km2"],rp[100]["km2"]],
-        marker_color=["#00aaff","#ffaa00","#ff3333"],
-        text=[f'{rp[y]["km2"]:,} km²' for y in [10,50,100]],textposition="outside",textfont=dict(color="#E8EAF0")))
-    fig_rp.update_layout(paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
-        yaxis=dict(title="Inundated Area (km²)",gridcolor="#1E2D40"),xaxis=dict(gridcolor="#1E2D40"),
-        title=dict(text="Return Period Comparison",font=dict(color="#E8EAF0")),margin=dict(t=40,b=10))
-    st.plotly_chart(fig_rp,use_container_width=True)
+    # Comparison bar chart only (scatter maps removed — insufficient resolution)
+    rp_c1, rp_c2 = st.columns([2,1])
+    with rp_c1:
+        fig_rp = go.Figure(go.Bar(
+            x=["10-Year","50-Year","100-Year"],
+            y=[rp[10]["km2"],rp[50]["km2"],rp[100]["km2"]],
+            marker_color=["#00aaff","#ffaa00","#ff3333"],
+            text=[f'{rp[y]["km2"]:,} km²' for y in [10,50,100]],
+            textposition="outside",textfont=dict(color="#E8EAF0"),
+            width=[0.5,0.5,0.5]
+        ))
+        fig_rp.update_layout(
+            paper_bgcolor="#0D1829",plot_bgcolor="#0A1520",font=dict(color="#8897AA"),
+            yaxis=dict(title="Inundated Area (km²)",gridcolor="#1E2D40",range=[0,5500]),
+            xaxis=dict(gridcolor="#1E2D40"),
+            title=dict(text="Return Period Flood Extent Comparison — Sindh Province",font=dict(color="#E8EAF0")),
+            margin=dict(t=50,b=10),height=420
+        )
+        st.plotly_chart(fig_rp,use_container_width=True)
+    with rp_c2:
+        for yr,color in zip([10,50,100],["#00aaff","#ffaa00","#ff3333"]):
+            st.markdown(f'<div class="kpi" style="border-color:rgba({int(color[1:3],16)},{int(color[3:5],16)},{int(color[5:7],16)},0.4)"><div class="kpi-val" style="color:{color}">{rp[yr]["km2"]:,} km²</div><div class="kpi-lbl">{yr}-Year Inundated Area</div><div class="kpi-sub">{rp[yr]["ha"]/1e6:.2f}M ha affected</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="info">Return periods represent the statistical recurrence interval of flood events. A 100-year flood has a 1% probability of being exceeded in any given year. Climate projections suggest Pakistan 100-year events may become 50-year events by 2050.</div>', unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — Impact Maps
@@ -573,8 +587,32 @@ with tabs[10]:
     df_admin["confidence_pct"] = np.random.uniform(65,92,8).round(0).astype(int)
     df_admin = df_admin[["neighborhood","buildings","population","roads_km","flood_pct","max_depth_m","confidence_pct"]]
     df_admin.columns = ["District","Bldgs Damaged","Pop Affected","Roads Flooded (km)","% Area Flooded","Max Depth (m)","Confidence (%)"]
-    st.dataframe(df_admin.style.background_gradient(subset=["% Area Flooded"],cmap="YlOrRd")
-                              .background_gradient(subset=["Confidence (%)"],cmap="RdYlGn"),use_container_width=True)
+
+    # Colour cells manually (no matplotlib needed)
+    flood_vals = df_admin["% Area Flooded"].values
+    conf_vals  = df_admin["Confidence (%)"].values
+    def heat_color(v, vmin, vmax, low_good=False):
+        t = (v-vmin)/(vmax-vmin+0.001)
+        if low_good: t = 1-t
+        r = int(255*min(1,2*t)); g = int(255*min(1,2*(1-t)))
+        return f"rgba({r},{g},50,0.3)"
+    flood_colors = [heat_color(v, flood_vals.min(), flood_vals.max()) for v in flood_vals]
+    conf_colors  = [heat_color(v, conf_vals.min(),  conf_vals.max(),  low_good=False) for v in conf_vals]
+
+    fig_tbl = go.Figure(go.Table(
+        header=dict(values=list(df_admin.columns),
+                    fill_color="#0D1829",font=dict(color="#00C8FF",size=12),align="left",line_color="#1E2D40"),
+        cells=dict(
+            values=[df_admin[c] for c in df_admin.columns],
+            fill_color=[
+                ["#0A1520"]*8,["#0A1520"]*8,["#0A1520"]*8,["#0A1520"]*8,
+                flood_colors, ["#0A1520"]*8, conf_colors
+            ],
+            font=dict(color="#E8EAF0",size=11), align="left", line_color="#1E2D40", height=30
+        )
+    ))
+    fig_tbl.update_layout(paper_bgcolor="#0D1829",margin=dict(l=0,r=0,t=10,b=0),height=320)
+    st.plotly_chart(fig_tbl,use_container_width=True)
 
     with st.expander("Data Sources"):
         st.markdown("""
