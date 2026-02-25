@@ -41,4 +41,5 @@ This repository contains a full pipeline for visualizing and analyzing flood ext
 5. **Deploy:** Click **"Deploy!"**. The build process might take a few minutes as it installs `geemap` and other dependencies.
 
 ---
-**Author / Data Source:** Data provided by Copernicus EU / European Space Agency / Google Earth Engine.
+**Author:** Damilola Akindele
+**Data Source:** Data provided by Copernicus EU / European Space Agency / Google Earth Engine.
