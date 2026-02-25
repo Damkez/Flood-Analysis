@@ -100,7 +100,7 @@ def impact_data():
 def risk_curve():
     probs = np.array([0.5,0.2,0.1,0.05,0.02,0.01,0.005,0.002])
     losses = np.array([0.5,2,5,10,18,30,50,80])  # billion USD
-    ead = np.trapz(losses,1-probs)
+    ead = np.trapezoid(losses, 1-probs)
     return probs, losses, ead
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
